@@ -1,0 +1,11 @@
+logs/
+*.log
+*.log.gz
+.last-player-check
+world/
+world_nether/
+world_the_end/
+libraries/
+versions/
+*.jar
+cache/

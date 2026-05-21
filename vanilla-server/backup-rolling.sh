@@ -1,69 +1,72 @@
 #!/bin/bash
-# Minecraft Vanilla Server Rolling Backup
-# Syncs the live server to a timestamped backup, keeping a rolling window of N backups.
+# Rolling Minecraft backup — runs every 10 minutes, retains 3 hours
+# Fast rsync copy of the world folder with incremental hardlinks
+# This is a wrapper that delegates to the main backup-quick.sh
 
 set -euo pipefail
 
-SERVER_DIR="$HOME/devel/minecraft/minecraft-server"
-BACKUP_BASE="$HOME/devel/minecraft/server-backup"
-BACKUP_NAME="vanilla-server-$(date +%Y%m%d-%H%M%S)"
-BACKUP_DIR="$BACKUP_BASE/$BACKUP_NAME"
-MAX_BACKUPS=7  # Keep the last 7 rolling backups
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+MC_DIR="$HOME/devel/minecraft/minecraft-server"
 
-echo "=== Minecraft Rolling Backup ==="
-echo "Started: $(date)"
-echo ""
+# If backup-quick.sh exists in the minecraft-server dir, use it
+if [ -x "$MC_DIR/backup-quick.sh" ]; then
+    "$MC_DIR/backup-quick.sh"
+    echo "✅ Rolling backup completed via backup-quick.sh"
+    exit 0
+fi
 
-# Create backup directory
+# Fallback: inline rolling backup logic
+WORLD_DIR="$MC_DIR/world"
+BACKUP_DIR="$HOME/devel/minecraft/backups/quick"
+RETENTION_MINUTES=180
+TIMESTAMP=$(date '+%Y%m%d_%H%M%S')
+LOG_FILE="$HOME/Library/Logs/minecraft-ngrok/backup.log"
+
 mkdir -p "$BACKUP_DIR"
 
-# Use --link-dest to the latest existing backup for incremental (hardlinked) backups
-LATEST_BACKUP=$(ls -dt "$BACKUP_BASE"/vanilla-server-* 2>/dev/null | head -1)
-LINK_DEST_ARG=""
-if [ -n "$LATEST_BACKUP" ] && [ "$LATEST_BACKUP" != "$BACKUP_DIR" ]; then
-    LINK_DEST_ARG="--link-dest=$LATEST_BACKUP"
-    echo "Incremental backup based on: $(basename "$LATEST_BACKUP")"
+log() {
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] [QUICK] $*" >> "$LOG_FILE"
+}
+
+log "Starting rolling backup..."
+
+# Fast rsync copy — uses hardlinks for unchanged files to save space
+LATEST="$BACKUP_DIR/latest"
+SNAPSHOT="$BACKUP_DIR/world_quick_$TIMESTAMP"
+
+# rsync with --link-dest for incremental copies
+if [ -d "$LATEST" ]; then
+  rsync -a --delete --link-dest="$LATEST" "$WORLD_DIR/" "$SNAPSHOT/" 2>>"$LOG_FILE"
 else
-    echo "Full backup (no previous backup found)"
+  rsync -a --delete "$WORLD_DIR/" "$SNAPSHOT/" 2>>"$LOG_FILE"
 fi
 
-# Rsync the server world and config files
-echo "Syncing world data..."
-rsync -a --delete \
-    $LINK_DEST_ARG \
-    --exclude='logs/' \
-    --exclude='libraries/' \
-    --exclude='versions/' \
-    --exclude='*.jar' \
-    "$SERVER_DIR/" "$BACKUP_DIR/"
+# Update latest symlink
+ln -sfn "$SNAPSHOT" "$LATEST"
 
-echo ""
-echo "Backup size:"
-du -sh "$BACKUP_DIR"
+SIZE=$(du -sh "$SNAPSHOT" | cut -f1)
+log "Rolling backup created: world_quick_$TIMESTAMP ($SIZE)"
 
-# Rotate old backups — keep only the most recent MAX_BACKUPS
-echo ""
-echo "Rotating old backups (keeping last $MAX_BACKUPS)..."
-cd "$BACKUP_BASE"
-BACKUP_COUNT=$(ls -d vanilla-server-* 2>/dev/null | wc -l | tr -d ' ')
-if [ "$BACKUP_COUNT" -gt "$MAX_BACKUPS" ]; then
-    REMOVE_COUNT=$((BACKUP_COUNT - MAX_BACKUPS))
-    echo "Removing $REMOVE_COUNT old backup(s)..."
-    ls -dt vanilla-server-* | tail -n "$REMOVE_COUNT" | while read -r old_backup; do
-        echo "  Removing: $old_backup"
-        rm -rf "$old_backup"
-    done
-else
-    echo "Only $BACKUP_COUNT backup(s) exist, no rotation needed."
+# Clean up snapshots older than retention period
+CUTOFF=$(date -v-${RETENTION_MINUTES}M '+%Y%m%d_%H%M%S' 2>/dev/null || date -d "-${RETENTION_MINUTES} minutes" '+%Y%m%d_%H%M%S' 2>/dev/null || echo "")
+if [ -n "$CUTOFF" ]; then
+  DELETED=0
+  for dir in "$BACKUP_DIR"/world_quick_*; do
+    [ -d "$dir" ] || continue
+    [ -L "$dir" ] && continue  # skip symlinks
+    DIRNAME=$(basename "$dir")
+    STAMP=${DIRNAME#world_quick_}
+    if [[ "$STAMP" < "$CUTOFF" ]]; then
+      rm -rf "$dir"
+      DELETED=$((DELETED + 1))
+    fi
+  done
+  if [ "$DELETED" -gt 0 ]; then
+    log "Cleaned up $DELETED old rolling backup(s)"
+  fi
 fi
 
-echo ""
-echo "Current backups:"
-ls -dt "$BACKUP_BASE"/vanilla-server-* 2>/dev/null | while read -r b; do
-    SIZE=$(du -sh "$b" 2>/dev/null | cut -f1)
-    echo "  $(basename "$b")  ($SIZE)"
-done
-
-echo ""
-echo "Completed: $(date)"
-echo "=== Backup Done ==="
+# Count remaining
+REMAINING=$(ls -1d "$BACKUP_DIR"/world_quick_* 2>/dev/null | grep -v latest | wc -l | tr -d ' ')
+log "Total rolling backups: $REMAINING"
+echo "Rolling backup complete: world_quick_$TIMESTAMP ($SIZE), $REMAINING snapshots retained"

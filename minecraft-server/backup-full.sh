@@ -7,7 +7,7 @@ set -euo pipefail
 MC_DIR="$HOME/devel/minecraft/minecraft-server"
 WORLD_DIR="$MC_DIR/world"
 BACKUP_DIR="$HOME/devel/minecraft/backups/full"
-RETENTION_HOURS=72
+RETENTION_HOURS=96
 TIMESTAMP=$(date '+%Y%m%d_%H%M%S')
 LOG_FILE="$HOME/Library/Logs/minecraft-ngrok/backup.log"
 
